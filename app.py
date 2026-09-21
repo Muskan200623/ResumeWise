@@ -14,6 +14,7 @@ try:
     from spellchecker import SpellChecker
     SPELLCHECKER_AVAILABLE = True
 except ImportError:
+    SpellChecker = None
     SPELLCHECKER_AVAILABLE = False
 
 
@@ -40,6 +41,11 @@ TECHNICAL_WORDS = {
     "mongodb", "mysql", "git", "github", "docker", "aws", "api", "apis",
     "ui", "ux", "dbms", "kmeans", "tfidf", "css", "vite", "fastapi",
     "flask", "django", "excel", "powerbi", "machine", "learning",
+    "analytics", "analytic", "ananya", "sharma", "gmail", "email",
+    "mail", "k-means", "means", "customer", "customers", "dataset",
+    "datasets", "dashboard", "dashboards", "insights", "preprocess",
+    "preprocessing", "visualization", "visualizations", "linkedin",
+    "portfolio", "purnea", "bihar", "rajasthan", "banasthali",
 }
 
 SECTION_ALIASES = {
@@ -239,6 +245,50 @@ def make_text_context(text, start, end, window=48):
     return snippet, line_number
 
 
+def is_protected_dictionary_word(text, word, match):
+    """Return True when a word should not be flagged as a spelling error.
+
+    This avoids false positives for names, email addresses, URLs, and
+    common technical/resume vocabulary.
+    """
+    normalized = word.lower().strip(".-_")
+
+    protected_words = TECHNICAL_WORDS | {
+        "resume", "resumes", "btech", "cgpa", "pvt", "ltd",
+        "banasthali", "vidyapith", "purnea", "bihar", "rajasthan",
+        "firebase", "wordpress", "concrete", "nasscom", "thingqbator",
+        "flipkart", "grid", "produscope", "khadi", "aarohini",
+        "appcrave", "technovations", "muskan", "kumari", "ananya",
+        "sharma", "gmail", "email", "mail", "analytics", "analytic",
+        "kmeans", "k-means", "means", "linkedin", "github", "netlify",
+        "javascript", "typescript", "mysql", "oracle", "dbms", "dsa",
+        "ai", "ml", "data", "analyst", "analysis", "experience",
+    }
+
+    if normalized in protected_words or len(normalized) <= 3:
+        return True
+
+    start, end = match.span()
+    before = text[max(0, start - 80):start]
+    after = text[end:min(len(text), end + 80)]
+
+    # Do not check parts of email addresses, URLs, or handles.
+    nearby = before + text[start:end] + after
+    if "@" in nearby or "http" in nearby.lower() or "www." in nearby.lower():
+        return True
+
+    # Proper names are commonly missing from English dictionaries.
+    original = match.group(0)
+    if original[:1].isupper() and not original.isupper():
+        return True
+
+    # Avoid flagging words that are part of hyphenated technical terms.
+    if (start > 0 and text[start - 1] == "-") or (end < len(text) and text[end] == "-"):
+        return True
+
+    return False
+
+
 def spelling_and_writing_review(text):
     """Find possible spelling and writing issues with location/context."""
     findings = []
@@ -275,35 +325,42 @@ def spelling_and_writing_review(text):
         words = normalize_words(text)
         unknown_words = spell.unknown(words)
 
-        # Common resume words and technical terms that should not be flagged.
-        accepted_words = TECHNICAL_WORDS | {
-            "resume", "resumes", "btech", "cgpa", "pvt", "ltd", "banasthali",
-            "vidyapith", "purnea", "rajasthan", "firebase", "wordpress",
-            "concrete", "nasscom", "thingqbator", "flipkart", "grid",
-            "produscope", "khadi", "aarohini", "kmeans", "streamlit",
-            "appcrave", "technovations", "muskan", "kumari", "github",
-            "linkedin", "netlify", "javascript", "typescript", "mysql",
-            "oracle", "dbms", "dsa", "ai", "ml",
-        }
-
         for word in sorted(unknown_words):
-            if word in accepted_words or len(word) <= 3:
+            # Always skip protected resume vocabulary before asking the
+            # dictionary for a correction. This prevents false positives such
+            # as Ananya -> banana and Sharma -> dharma.
+            if word in TECHNICAL_WORDS or len(word) <= 3:
+                continue
+
+            # Find the original occurrence so that we can inspect capitalization
+            # and surrounding email/URL text before showing a suggestion.
+            match = re.search(r"\b" + re.escape(word) + r"\b", text, re.IGNORECASE)
+            if not match:
+                continue
+
+            # Skip names, email addresses, URLs, and known resume terms.
+            # This check must happen before spell.correction().
+            if is_protected_dictionary_word(text, word, match):
                 continue
 
             suggestion = spell.correction(word)
             if not suggestion or suggestion == word:
                 continue
 
-            match = re.search(r"\b" + re.escape(word) + r"\b", text, re.IGNORECASE)
-            if match:
-                add_finding(
-                    "Possible spelling",
-                    match.group(0),
-                    suggestion,
-                    "Review",
-                    match.start(),
-                    match.end(),
-                )
+            # pyspellchecker can suggest unrelated words for names and domain
+            # terms. Only show suggestions that are reasonably close.
+            candidates = spell.candidates(word) or set()
+            if suggestion not in candidates:
+                continue
+
+            add_finding(
+                "Possible spelling",
+                match.group(0),
+                suggestion,
+                "Review",
+                match.start(),
+                match.end(),
+            )
 
     # 3. Repeated spaces can be a formatting issue. We deliberately do not
     # flag missing spaces after punctuation because PDF extraction frequently
@@ -946,8 +1003,8 @@ if analyze_button:
 
         if not SPELLCHECKER_AVAILABLE:
             st.info(
-                "Install pyspellchecker for additional dictionary-based spelling suggestions. "
-                "The app will show the suspected word, approximate line, and nearby context."
+                "Dictionary-based spelling checks are optional. Known technical terms, names, "
+                "emails, URLs, and hyphenated terms are ignored to reduce false positives."
             )
 
     with tab_suggestions:
